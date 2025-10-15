@@ -6,8 +6,9 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-const MAX_PLAYERS = 2; // Set for 2-player testing
+const MAX_PLAYERS = 2;
 const QUESTIONS_PER_TURN = 3;
+const DELAY_BEFORE_QUIZ = 2000; // 2000 milliseconds = 2 seconds
 
 const clients = {};
 const games = {};
@@ -69,6 +70,7 @@ wss.on("connection", (ws) => {
             }
         }
 
+        // --- CORRECTED 'play' METHOD WITH DELAY ---
         if (data.method === "play") {
             const { gameId, clientId } = data;
             const game = games[gameId];
@@ -80,30 +82,42 @@ wss.on("connection", (ws) => {
             const diceRoll = Math.floor(Math.random() * 6) + 1;
             game.state[currentPlayer.player].steps += diceRoll;
             game.state.lastDiceRoll = { player: currentPlayer.player, roll: diceRoll };
-            const questionSet = shuffleArray([...questionPool]).slice(0, QUESTIONS_PER_TURN);
-            game.state.status = 'answering_question';
-            game.state.playerAnswering = currentPlayer.player;
-            game.state.currentQuestionSet = questionSet;
-            game.state.currentQuestionIndex = 0;
-            game.state.lastEvent = `Player ${currentPlayer.player.toUpperCase()} is starting a quiz...`;
-            const firstQuestion = game.state.currentQuestionSet[0];
             
-            const askPayload = {
-                method: "ask_question",
-                question: firstQuestion.question,
-                playerAnswering: game.state.playerAnswering,
-                gameId: game.id,
-                questionNumber: 1,
-                totalQuestions: QUESTIONS_PER_TURN
-            };
-            clients[clientId].connection.send(JSON.stringify(askPayload));
-            
-            game.clients.forEach(client => {
-                if (client.clientId !== clientId) {
-                    const updatePayload = { method: "update", game: game };
-                    clients[client.clientId].connection.send(JSON.stringify(updatePayload));
+            // 1. First, send an update to EVERYONE so they see the move.
+            game.state.lastEvent = `Player ${currentPlayer.player.toUpperCase()} rolled a ${diceRoll}.`;
+            broadcastUpdate(gameId);
+
+            // 2. After a delay, start the quiz for the current player.
+            setTimeout(() => {
+                // Check if the game still exists (a player might have disconnected during the delay)
+                if (!games[gameId]) return;
+
+                const questionSet = shuffleArray([...questionPool]).slice(0, QUESTIONS_PER_TURN);
+                game.state.status = 'answering_question';
+                game.state.playerAnswering = currentPlayer.player;
+                game.state.currentQuestionSet = questionSet;
+                game.state.currentQuestionIndex = 0;
+                
+                const firstQuestion = game.state.currentQuestionSet[0];
+                const askPayload = {
+                    method: "ask_question",
+                    question: firstQuestion.question,
+                    playerAnswering: game.state.playerAnswering,
+                    gameId: game.id,
+                    questionNumber: 1,
+                    totalQuestions: QUESTIONS_PER_TURN
+                };
+
+                // Send the question only to the player whose turn it is
+                if(clients[clientId]) {
+                    clients[clientId].connection.send(JSON.stringify(askPayload));
                 }
-            });
+
+                // Also update the event text for the other players to see
+                game.state.lastEvent = `Player ${currentPlayer.player.toUpperCase()} is starting a quiz...`;
+                broadcastUpdate(gameId);
+
+            }, DELAY_BEFORE_QUIZ);
         }
         
         if (data.method === "submit_answer") {
@@ -152,7 +166,6 @@ wss.on("connection", (ws) => {
         let gameToEnd = null;
         let gameIdToEnd = null;
 
-        // Find which game the disconnected client was in
         for (const gameId in games) {
             const game = games[gameId];
             const clientIndex = game.clients.findIndex(c => c.clientId === clientId);
@@ -163,24 +176,20 @@ wss.on("connection", (ws) => {
             }
         }
 
-        // --- NEW LOGIC: If a player in an active game disconnects, end the game ---
         if (gameToEnd) {
             console.log(`Player left game ${gameIdToEnd}. Ending game for all participants.`);
             
             const gameOverPayload = {
                 method: "game_over",
-                results: gameToEnd.state.answeredQuestions || [] // Send results or empty array
+                results: gameToEnd.state.answeredQuestions || []
             };
 
-            // Send the game over message to all REMAINING players
             gameToEnd.clients.forEach(client => {
-                // Check if the remaining client still exists before sending
                 if (client.clientId !== clientId && clients[client.clientId]) {
                     clients[client.clientId].connection.send(JSON.stringify(gameOverPayload));
                 }
             });
 
-            // Delete the game from memory
             delete games[gameIdToEnd];
         }
 
@@ -215,7 +224,7 @@ function broadcastUpdate(gameId) {
     if (!game) return;
     const updatePayload = { method: "update", game: game };
     game.clients.forEach((client) => {
-        if(clients[client.clientId]) { // Safety check
+        if(clients[client.clientId]) {
             clients[client.clientId].connection.send(JSON.stringify(updatePayload));
         }
     });
