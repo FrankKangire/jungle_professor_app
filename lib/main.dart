@@ -6,10 +6,9 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:share_plus/share_plus.dart';
 
-// --- Configuration ---
-const String SERVER_IP = "192.168.1.6"; // Your local IP
-const String PHP_API_URL = "http://$SERVER_IP/jungle_professor/server/api";
-const String WEBSOCKET_URL = "ws://$SERVER_IP:9090";
+// --- LIVE SERVER CONFIGURATION ---
+const String PHP_API_URL = "https://jungle-professor-api.onrender.com";
+const String WEBSOCKET_URL = "wss://jungle-professor-game-server.onrender.com";
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -27,18 +26,19 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       title: 'Jungle Professor',
       theme: ThemeData(
-        primarySwatch: Colors.green,
-        scaffoldBackgroundColor: Colors.green[50],
+        scaffoldBackgroundColor: Colors.grey[200],
+        primarySwatch: Colors.blueGrey,
         appBarTheme: AppBarTheme(
-          backgroundColor: Colors.green[800],
+          backgroundColor: Colors.blueGrey[900],
           foregroundColor: Colors.white,
         ),
         elevatedButtonTheme: ElevatedButtonThemeData(
           style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.green[700],
+            backgroundColor: Colors.blueGrey[800],
             foregroundColor: Colors.white,
-            padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 15),
-            textStyle: const TextStyle(fontSize: 16),
+            padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 20),
+            textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           ),
         ),
       ),
@@ -48,6 +48,7 @@ class MyApp extends StatelessWidget {
         '/login': (context) => const LoginPage(),
         '/signup': (context) => const SignupPage(),
         '/welcome': (context) => const WelcomePage(),
+        '/select_game': (context) => const GameSelectionPage(),
         '/saved_results': (context) => const SavedResultsListPage(),
       },
     );
@@ -130,8 +131,8 @@ class HomePage extends StatelessWidget {
               Icon(Icons.park, size: 100, color: Colors.green[800]),
               const SizedBox(height: 20),
               Text(
-                'Welcome to Jungle Professor!',
-                style: Theme.of(context).textTheme.headlineMedium?.copyWith(color: Colors.green[900]),
+                'Welcome!',
+                style: Theme.of(context).textTheme.headlineMedium?.copyWith(color: Colors.grey[800]),
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 10),
@@ -184,7 +185,7 @@ class _LoginPageState extends State<LoginPage> {
         }
       }
     } catch (e) {
-      if(mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: Could not connect to server. Check IP address.')));
+      if(mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Error: Could not connect to server.')));
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -226,6 +227,10 @@ class _SignupPageState extends State<SignupPage> {
   bool _isLoading = false;
 
   Future<void> _signup() async {
+    if (_usernameController.text.isEmpty || _passwordController.text.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please fill in all fields.')));
+        return;
+    }
     setState(() => _isLoading = true);
     try {
       final response = await http.post(
@@ -246,11 +251,9 @@ class _SignupPageState extends State<SignupPage> {
         }
       }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: Could not connect to server.')));
+      if(mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Error: Could not connect to server.')));
     } finally {
-      if (mounted) {
-        setState(() => _isLoading = false);
-      }
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -262,13 +265,14 @@ class _SignupPageState extends State<SignupPage> {
         padding: const EdgeInsets.all(16.0),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            TextField(controller: _usernameController, decoration: const InputDecoration(labelText: 'Username')),
+            TextField(controller: _usernameController, decoration: const InputDecoration(labelText: 'Username', border: OutlineInputBorder())),
             const SizedBox(height: 12),
-            TextField(controller: _passwordController, obscureText: true, decoration: const InputDecoration(labelText: 'Password')),
+            TextField(controller: _passwordController, obscureText: true, decoration: const InputDecoration(labelText: 'Password', border: OutlineInputBorder())),
             const SizedBox(height: 20),
             _isLoading
-                ? const CircularProgressIndicator()
+                ? const Center(child: CircularProgressIndicator())
                 : ElevatedButton(onPressed: _signup, child: const Text('Sign Up')),
           ],
         ),
@@ -285,6 +289,52 @@ class WelcomePage extends StatefulWidget {
 
 class _WelcomePageState extends State<WelcomePage> {
   String _username = 'Player';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadUsername();
+  }
+
+  Future<void> _loadUsername() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) {
+      setState(() {
+        _username = prefs.getString('username') ?? 'Player';
+      });
+    }
+  }
+  
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppMenu(title: 'Jungle Professor', actions: const [MenuAction.myResults, MenuAction.logout]),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text('Welcome, $_username!', style: Theme.of(context).textTheme.headlineMedium),
+            const SizedBox(height: 40),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pushNamed(context, '/select_game');
+              },
+              child: const Text('Choose Game'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class GameSelectionPage extends StatefulWidget {
+  const GameSelectionPage({Key? key}) : super(key: key);
+  @override
+  _GameSelectionPageState createState() => _GameSelectionPageState();
+}
+
+class _GameSelectionPageState extends State<GameSelectionPage> {
   String _statusMessage = '';
   bool _isFindingGame = false;
 
@@ -292,13 +342,8 @@ class _WelcomePageState extends State<WelcomePage> {
   StreamController<String>? _broadcastController;
   StreamSubscription? _streamListener;
   String? _clientId;
+  String? _playerIdentifier;
   bool _connectionHandedOff = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadUsername();
-  }
 
   @override
   void dispose() {
@@ -310,16 +355,7 @@ class _WelcomePageState extends State<WelcomePage> {
     super.dispose();
   }
 
-  Future<void> _loadUsername() async {
-    final prefs = await SharedPreferences.getInstance();
-    if (mounted) {
-      setState(() {
-        _username = prefs.getString('username') ?? 'Player';
-      });
-    }
-  }
-
-  void _findGame() {
+  void _findGame(String gameType) {
     setState(() {
       _isFindingGame = true;
       _statusMessage = 'Connecting to game server...';
@@ -341,7 +377,7 @@ class _WelcomePageState extends State<WelcomePage> {
       },
       onError: (error) {
         if (mounted && !_connectionHandedOff) {
-          setState(() { _isFindingGame = false; _statusMessage = 'Connection error. Check server and IP.'; });
+          setState(() { _isFindingGame = false; _statusMessage = 'Connection error.'; });
         }
         if (!(_broadcastController?.isClosed ?? true)) _broadcastController!.addError(error);
       },
@@ -354,17 +390,16 @@ class _WelcomePageState extends State<WelcomePage> {
 
       if (method == 'connect') {
         _clientId = data['clientId'];
-        setState(() => _statusMessage = 'Finding a game...');
-        _channel!.sink.add(jsonEncode({'method': 'find_game', 'clientId': _clientId}));
+        setState(() => _statusMessage = 'Finding a $gameType game...');
+        _channel!.sink.add(jsonEncode({'method': 'find_game', 'clientId': _clientId, 'gameType': gameType}));
       } else if (method == 'join') {
+        _playerIdentifier = data['player'];
         setState(() => _statusMessage = 'Joined Game! Waiting for players...');
       } else if (method == 'start') {
         _streamListener?.cancel();
         _connectionHandedOff = true;
         
         if (mounted) {
-          setState(() { _isFindingGame = false; _statusMessage = ''; });
-
           Navigator.pushReplacement(
             context,
             MaterialPageRoute(
@@ -373,7 +408,8 @@ class _WelcomePageState extends State<WelcomePage> {
                 stream: _broadcastController!.stream,
                 gameId: data['game']['id'],
                 clientId: _clientId!, 
-                player: (data['game']['clients'] as List).firstWhere((c) => c['clientId'] == _clientId)['player'],
+                player: _playerIdentifier!,
+                gameType: gameType,
                 initialGameData: data,
               ),
             ),
@@ -386,28 +422,33 @@ class _WelcomePageState extends State<WelcomePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppMenu(title: 'Jungle Professor', actions: const [MenuAction.myResults, MenuAction.logout]),
+      appBar: AppBar(title: const Text('Select a Game')),
       body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(20.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Text('Welcome, $_username!', style: Theme.of(context).textTheme.headlineMedium),
-              const SizedBox(height: 40),
-              if (_isFindingGame) ...[
+        child: _isFindingGame
+          ? Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
                 const CircularProgressIndicator(),
                 const SizedBox(height: 20),
                 Text(_statusMessage, textAlign: TextAlign.center),
-              ] else ...[
+              ],
+            )
+          : Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
                 ElevatedButton(
-                  onPressed: _findGame,
-                  child: const Text('Find Game'),
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.green[800]),
+                  onPressed: () => _findGame('jungle'),
+                  child: const Text('Jungle Professor'),
                 ),
-              ]
-            ],
-          ),
-        ),
+                const SizedBox(height: 20),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.lightBlue[800]),
+                  onPressed: () => _findGame('city'),
+                  child: const Text('City Tour'),
+                ),
+              ],
+            ),
       ),
     );
   }
@@ -419,10 +460,11 @@ class GamePage extends StatefulWidget {
   final String gameId;
   final String clientId;
   final String player;
+  final String gameType;
   final Map<String, dynamic> initialGameData;
 
   const GamePage({
-    required this.channel, required this.stream, required this.gameId, required this.clientId, required this.player, required this.initialGameData, Key? key,
+    required this.channel, required this.stream, required this.gameId, required this.clientId, required this.player, required this.gameType, required this.initialGameData, Key? key,
   }) : super(key: key);
 
   @override
@@ -430,8 +472,8 @@ class GamePage extends StatefulWidget {
 }
 
 class _GamePageState extends State<GamePage> {
-  late double minDimension;
-  late Offset initialPosition;
+  late double minDimension = 0;
+  late Offset initialPosition = const Offset(0, 0);
   StreamSubscription? _gamePageListener;
   String gameStatus = 'playing';
   int currentPlayerIndex = 0;
@@ -439,6 +481,7 @@ class _GamePageState extends State<GamePage> {
   int totalPlayers = 0;
   String _lastEventText = "Game has started!";
   bool _isPopupVisible = false;
+  List<Map<String, dynamic>> _currentResults = [];
 
   final List<Color> playerColors = [Colors.blue, Colors.yellow, Colors.red, Colors.green];
 
@@ -460,16 +503,16 @@ class _GamePageState extends State<GamePage> {
         Navigator.of(context).pushReplacement(MaterialPageRoute(
           builder: (context) => ResultsPage(
             results: List<Map<String, dynamic>>.from(data['results']),
+            gameType: data['gameType'] ?? widget.gameType,
           ),
         ));
       }
     },
     onDone: () {
-      if(mounted) {
-        if (!_isPopupVisible) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Game Over: A player disconnected.')));
-          Navigator.of(context).pop();
-        }
+      if(mounted && !_isPopupVisible) {
+        Navigator.of(context).pushReplacement(MaterialPageRoute(
+          builder: (context) => ResultsPage(results: _currentResults, gameType: widget.gameType),
+        ));
       }
     });
   }
@@ -538,6 +581,11 @@ class _GamePageState extends State<GamePage> {
         totalPlayers = clients.length;
         currentPlayerIndex = gameState['currentPlayerIndex'];
         _lastEventText = gameState['lastEvent'] ?? "Your turn!";
+        
+        if (gameState['answeredQuestions'] != null) {
+          _currentResults = List<Map<String, dynamic>>.from(gameState['answeredQuestions']);
+        }
+
         for (var i = 0; i < totalPlayers; i++) {
           String playerKey = 'p${i + 1}';
           if (gameState.containsKey(playerKey)) {
@@ -558,9 +606,9 @@ class _GamePageState extends State<GamePage> {
 
   Offset calculatePlayerPosition(int steps) {
     double xPos = 0.0, yPos = 0.0;
-    if (this.mounted && (initialPosition != null)) {
-      xPos = initialPosition.dx;
-      yPos = initialPosition.dy;
+    if (this.mounted && minDimension > 0) {
+        xPos = initialPosition.dx;
+        yPos = initialPosition.dy;
     }
     
     int effectiveSteps = steps > 0 ? (steps % 34 == 0 ? 33 : steps % 34) : 0;
@@ -603,6 +651,8 @@ class _GamePageState extends State<GamePage> {
 
   @override
   Widget build(BuildContext context) {
+    final Color themeColor = widget.gameType == 'jungle' ? Colors.green : Colors.lightBlue;
+    final String boardImage = widget.gameType == 'jungle' ? 'images/IMG-20240301-WA0006.jpg' : 'images/IMG-20240305-WA0002.jpg';
     final String currentPlayerTurn = 'p${currentPlayerIndex + 1}';
     final bool isMyTurn = (widget.player == currentPlayerTurn);
     final bool canIRoll = isMyTurn && gameStatus == 'playing';
@@ -616,21 +666,29 @@ class _GamePageState extends State<GamePage> {
 
     return WillPopScope(
       onWillPop: () async {
-        final shouldPop = await showDialog<bool>(
+        final shouldLeave = await showDialog<bool>(
           context: context,
           builder: (context) => AlertDialog(
             title: const Text('Leave Game?'),
-            content: const Text('Are you sure you want to leave the current game? This will end the game for all players.'),
+            content: const Text('Are you sure you want to leave? This will end the game for all players.'),
             actions: [
-              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Stay')),
               TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('Leave')),
             ],
           ),
         );
-        return shouldPop ?? false;
+
+        if (shouldLeave ?? false) {
+          Navigator.of(context).pushReplacement(MaterialPageRoute(
+            builder: (context) => ResultsPage(results: _currentResults, gameType: widget.gameType),
+          ));
+          return false;
+        }
+        
+        return false;
       },
       child: Scaffold(
-        appBar: AppBar(title: Text("Game - You are ${widget.player.toUpperCase()}"), automaticallyImplyLeading: false),
+        appBar: AppBar(title: Text("Game - You are ${widget.player.toUpperCase()}"), backgroundColor: themeColor),
         body: Column(
           children: [
             Expanded(
@@ -662,7 +720,7 @@ class _GamePageState extends State<GamePage> {
                     height: minDimension,
                     child: Stack(
                       children: [
-                        Image.asset('images/IMG-20240301-WA0006.jpg', fit: BoxFit.cover),
+                        Image.asset(boardImage, fit: BoxFit.cover),
                         ...playerWidgets,
                       ],
                     ),
@@ -677,7 +735,7 @@ class _GamePageState extends State<GamePage> {
                   Text(
                     _lastEventText,
                     textAlign: TextAlign.center,
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold, color: Colors.green[900]),
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold, color: Colors.grey[800]),
                   ),
                   const SizedBox(height: 12),
                   ElevatedButton(
@@ -698,40 +756,54 @@ class _GamePageState extends State<GamePage> {
   }
 }
 
-// --- NEW WIDGET: ResultsPage ---
 class ResultsPage extends StatelessWidget {
   final List<Map<String, dynamic>> results;
+  final String gameType;
 
-  const ResultsPage({Key? key, required this.results}) : super(key: key);
+  const ResultsPage({Key? key, required this.results, required this.gameType}) : super(key: key);
 
   Future<void> _saveResults(BuildContext context) async {
     final prefs = await SharedPreferences.getInstance();
     final username = prefs.getString('username');
     if (username == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('You must be logged in to save.')));
-      return;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('You must be logged in to save.')));
+        return;
     }
+
+    final Map<String, String> body = {
+      'username': username,
+      'results_data': jsonEncode(results),
+      'game_type': gameType,
+    };
+
+    print("--- SENDING DATA TO SERVER ---");
+    print("URL: $PHP_API_URL/save_results.php");
+    print("Body: $body");
 
     try {
       final response = await http.post(
         Uri.parse('$PHP_API_URL/save_results.php'),
-        body: {
-          'username': username,
-          'results_data': jsonEncode(results),
-        },
+        body: body, 
       );
+
+      print("--- SERVER RESPONSE ---");
+      print("Status Code: ${response.statusCode}");
+      print("Response Body: ${response.body}");
+      
       if (context.mounted) {
         final data = jsonDecode(response.body);
         if (data['status'] == 'success') {
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Results saved!')));
           Navigator.of(context).pushNamedAndRemoveUntil('/welcome', (route) => false);
         } else {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(data['message'])));
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Save failed: ${data['message']}')));
         }
       }
     } catch(e) {
+      print("--- HTTP ERROR ---");
+      print(e.toString());
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Error saving results.')));
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Error saving results. Check logs.')));
       }
     }
   }
@@ -773,8 +845,10 @@ class ResultsPage extends StatelessWidget {
           ),
           Padding(
             padding: const EdgeInsets.all(16.0),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            child: Wrap(
+              spacing: 12.0,
+              runSpacing: 12.0,
+              alignment: WrapAlignment.center,
               children: [
                 ElevatedButton.icon(
                   onPressed: () => _saveResults(context),
@@ -786,9 +860,10 @@ class ResultsPage extends StatelessWidget {
                   icon: const Icon(Icons.share),
                   label: const Text('Share'),
                 ),
-                ElevatedButton(
+                ElevatedButton.icon(
                   onPressed: () => Navigator.of(context).pushNamedAndRemoveUntil('/welcome', (route) => false),
-                  child: const Text('Done'),
+                  icon: const Icon(Icons.done),
+                  label: const Text('Done'),
                   style: ElevatedButton.styleFrom(backgroundColor: Colors.grey),
                 ),
               ],
@@ -800,7 +875,6 @@ class ResultsPage extends StatelessWidget {
   }
 }
 
-// --- NEW WIDGET: SavedResultsListPage ---
 class SavedResultsListPage extends StatefulWidget {
   const SavedResultsListPage({Key? key}) : super(key: key);
   @override
@@ -833,14 +907,14 @@ class _SavedResultsListPageState extends State<SavedResultsListPage> {
     return [];
   }
   
-  void _viewResult(int resultId) async {
+  void _viewResult(int resultId, String gameType) async {
     try {
       final response = await http.get(Uri.parse('$PHP_API_URL/get_single_result.php?id=$resultId'));
       if (context.mounted) {
         final data = jsonDecode(response.body);
         if (data['status'] == 'success') {
            Navigator.of(context).push(MaterialPageRoute(
-              builder: (context) => ResultsPage(results: List<Map<String, dynamic>>.from(data['data'])),
+              builder: (context) => ResultsPage(results: List<Map<String, dynamic>>.from(data['data']), gameType: gameType),
            ));
         }
       }
@@ -868,10 +942,13 @@ class _SavedResultsListPageState extends State<SavedResultsListPage> {
             itemCount: resultsList.length,
             itemBuilder: (context, index) {
               final result = resultsList[index];
+              final String gameTitle = (result['game_type'] == 'jungle' ? 'Jungle Professor' : 'City Tour');
+              final String createdAt = result['created_at'] ?? 'Unknown date';
               return ListTile(
-                leading: const Icon(Icons.history),
-                title: Text('Game from ${result['created_at']}'),
-                onTap: () => _viewResult(result['id']),
+                leading: Icon(result['game_type'] == 'jungle' ? Icons.park : Icons.location_city),
+                title: Text(gameTitle),
+                subtitle: Text('Played on $createdAt'),
+                onTap: () => _viewResult(int.parse(result['id']), result['game_type']),
               );
             },
           );
@@ -880,3 +957,4 @@ class _SavedResultsListPageState extends State<SavedResultsListPage> {
     );
   }
 }
+
