@@ -1,18 +1,22 @@
-const http = require("http");
-const express = require("express");
-const WebSocket = require("ws");
+// server/game_server/server.js
+// Unified game server for Jungle Professor and City Tour
+// Supports: connect, find_game, animal_select, play, submit_answer
+// Broadcasts update every 1s and includes per-player animals
 
-const app = express();
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const WebSocket = require('ws');
 
-const MAX_PLAYERS = 2;
-const DELAY_BEFORE_QUIZ = 2000;
+const PORT = process.env.PORT || 9090;
+const MAX_PLAYERS = 4; // supports up to 4 players (your client is prepared for up to 4)
+const DELAY_BEFORE_QUIZ = 2000; // ms delay placeholder (if you want to trigger quiz flow)
+const BROADCAST_INTERVAL_MS = 1000;
 
-const clients = {};
-const games = {};
+const wss = new WebSocket.Server({ port: PORT });
 
-// --- MASTER QUESTION DATABASE (FULLY POPULATED) ---
+// In-memory structures
+// games: keyed by gameId (we use one gameId per gameType by default)
+const games = {}; // { [gameId]: { clients: [{clientId, ws, playerKey}], byClient: {clientId: {ws, playerKey, steps, animal}}, state: {...}, interval } }
+
+// Example questions per game type (empty or minimal — replace with real data)
 const allQuestions = {
     // --- JUNGLE PROFESSOR QUESTIONS ---
     'j_lion1': { id: "j_lion1", question: "LION: What is a group of lions called?", answer: "pride" },
@@ -217,242 +221,272 @@ const questionPositions = {
 };
 
 
-// --- GAME ENGINE LOGIC (UNCHANGED) ---
+function makeGameId(gameType) {
+  // Simple single-game-per-type id. If you later want multiple instances, switch to UUIDs.
+  return `${gameType}_game`;
+}
 
-wss.on("connection", (ws) => {
-    const clientId = guid();
-    clients[clientId] = { connection: ws };
-    console.log(`Client connected: ${clientId}`);
-
-    const connectPayload = { method: "connect", clientId: clientId };
-    ws.send(JSON.stringify(connectPayload));
-
-    ws.on("message", (message) => {
-        console.log(`Received from client ${clientId}: ${message}`);
-        const data = JSON.parse(message);
-
-        if (data.method === "find_game") {
-            const gameType = data.gameType;
-            if (!gameType || (gameType !== 'jungle' && gameType !== 'city')) return;
-            
-            let availableGame = Object.values(games).find(game => 
-                game.gameType === gameType && 
-                game.clients.length < MAX_PLAYERS && 
-                game.state.status !== 'full'
-            );
-
-            if (availableGame) {
-                const player = 'p' + (availableGame.clients.length + 1);
-                availableGame.clients.push({ clientId: clientId, player: player });
-                
-                const joinPayload = { method: "join", gameId: availableGame.id, player: player };
-                clients[clientId].connection.send(JSON.stringify(joinPayload));
-                
-                if (availableGame.clients.length === MAX_PLAYERS) {
-                    availableGame.state.status = 'full';
-                    startGame(availableGame.id);
-                }
-            } else {
-                const gameId = guid();
-                games[gameId] = {
-                    id: gameId,
-                    gameType: gameType,
-                    clients: [{ clientId: clientId, player: "p1" }],
-                    state: {},
-                };
-                const joinPayload = { method: "join", gameId: gameId, player: "p1" };
-                clients[clientId].connection.send(JSON.stringify(joinPayload));
-            }
-        }
-
-        if (data.method === "play") {
-            const { gameId, clientId } = data;
-            const game = games[gameId];
-            if (!game || game.state.status !== 'playing') return;
-            const movingPlayer = game.clients.find(c => c.clientId === clientId);
-            const currentPlayer = game.clients[game.state.currentPlayerIndex];
-            if (!movingPlayer || !currentPlayer || movingPlayer.player !== currentPlayer.player) return;
-
-            const diceRoll = Math.floor(Math.random() * 6) + 1;
-            game.state[currentPlayer.player].steps += diceRoll;
-            const newSteps = game.state[currentPlayer.player].steps % 34 === 0 ? 34 : game.state[currentPlayer.player].steps % 34;
-            
-            game.state.lastDiceRoll = { player: currentPlayer.player, roll: diceRoll };
-            game.state.lastEvent = `Player ${currentPlayer.player.toUpperCase()} rolled a ${diceRoll}.`;
-            
-            broadcastUpdate(gameId);
-
-            const positionData = questionPositions[newSteps];
-
-            if (positionData) {
-                setTimeout(() => {
-                    if (!games[gameId]) return;
-
-                    const gameType = game.gameType;
-                    const questionIdSet = positionData[gameType];
-                    const questionSet = questionIdSet.map(id => allQuestions[id]).filter(q => q);
-
-                    if (!questionSet || questionSet.length === 0) {
-                        console.log(`Error: Invalid or empty question set for square ${newSteps}.`);
-                        game.state.currentPlayerIndex = (game.state.currentPlayerIndex + 1) % game.clients.length;
-                        broadcastUpdate(gameId);
-                        return;
-                    }
-
-                    game.state.status = 'answering_question';
-                    game.state.playerAnswering = currentPlayer.player;
-                    game.state.currentQuestionSet = questionSet;
-                    game.state.currentQuestionIndex = 0;
-
-                    const firstQuestion = game.state.currentQuestionSet[0];
-                    const askPayload = {
-                        method: "ask_question",
-                        question: firstQuestion.question,
-                        playerAnswering: game.state.playerAnswering,
-                        gameId: game.id,
-                        questionNumber: 1,
-                        totalQuestions: game.state.currentQuestionSet.length,
-                    };
-                    
-                    if (clients[clientId]) {
-                        clients[clientId].connection.send(JSON.stringify(askPayload));
-                    }
-                    
-                    game.state.lastEvent = `Player ${currentPlayer.player.toUpperCase()} landed on a question square!`;
-                    broadcastUpdate(gameId);
-
-                }, DELAY_BEFORE_QUIZ);
-            } else {
-                game.state.currentPlayerIndex = (game.state.currentPlayerIndex + 1) % game.clients.length;
-            }
-        }
-        
-        if (data.method === "submit_answer") {
-            const { gameId, clientId, answer } = data;
-            const game = games[gameId];
-            if (!game || game.state.status !== 'answering_question') return;
-            const clientPlayer = game.clients.find(c => c.clientId === clientId);
-            if (clientPlayer && clientPlayer.player === game.state.playerAnswering) {
-                const qIndex = game.state.currentQuestionIndex;
-                const currentQuestion = game.state.currentQuestionSet[qIndex];
-                const isCorrect = answer.toLowerCase().trim() === currentQuestion.answer.toLowerCase();
-
-                game.state.answeredQuestions.push({
-                    player: clientPlayer.player,
-                    question: currentQuestion.question,
-                    providedAnswer: answer,
-                    correctAnswer: currentQuestion.answer,
-                    wasCorrect: isCorrect
-                });
-
-                if (qIndex < game.state.currentQuestionSet.length - 1) {
-                    game.state.currentQuestionIndex++;
-                    const nextQuestion = game.state.currentQuestionSet[game.state.currentQuestionIndex];
-                    const askPayload = {
-                        method: "ask_question",
-                        question: nextQuestion.question,
-                        playerAnswering: game.state.playerAnswering,
-                        gameId: game.id,
-                        questionNumber: game.state.currentQuestionIndex + 1,
-                        totalQuestions: game.state.currentQuestionSet.length,
-                    };
-                    clients[clientId].connection.send(JSON.stringify(askPayload));
-                } else {
-                    if(isCorrect) {
-                        game.state.lastEvent = `Player ${clientPlayer.player.toUpperCase()} finished the quiz correctly!`;
-                    } else {
-                        game.state.lastEvent = `Player ${clientPlayer.player.toUpperCase()} finished the quiz.`;
-                    }
-                    game.state.status = 'playing';
-                    game.state.playerAnswering = null;
-                    game.state.currentQuestionSet = null;
-                    game.state.currentQuestionIndex = null;
-                    game.state.currentPlayerIndex = (game.state.currentPlayerIndex + 1) % game.clients.length;
-                    broadcastUpdate(gameId);
-                }
-            }
-        }
-    });
-
-    ws.on("close", () => {
-        console.log(`Client disconnected: ${clientId}`);
-        let gameToEnd = null;
-        let gameIdToEnd = null;
-
-        for (const gameId in games) {
-            const game = games[gameId];
-            const clientIndex = game.clients.findIndex(c => c.clientId === clientId);
-            if (clientIndex !== -1) {
-                gameToEnd = game;
-                gameIdToEnd = gameId;
-                break;
-            }
-        }
-
-        if (gameToEnd) {
-            console.log(`Player left game ${gameIdToEnd}. Ending game for all participants.`);
-            
-            const gameOverPayload = {
-                method: "game_over",
-                results: gameToEnd.state.answeredQuestions || [],
-                gameType: gameToEnd.gameType
-            };
-
-            gameToEnd.clients.forEach(client => {
-                if (client.clientId !== clientId && clients[client.clientId]) {
-                    clients[client.clientId].connection.send(JSON.stringify(gameOverPayload));
-                }
-            });
-
-            delete games[gameIdToEnd];
-        }
-
-        delete clients[clientId];
-    });
-});
-
-function startGame(gameId) {
-    const game = games[gameId];
-    if (!game) return;
-    game.state = {
-        status: 'playing',
+function ensureGame(gameId) {
+  if (!games[gameId]) {
+    games[gameId] = {
+      clients: [], // ordered
+      byClient: {}, // clientId -> { ws, playerKey, steps, animal }
+      state: {
+        status: 'waiting',
         currentPlayerIndex: 0,
-        lastDiceRoll: null,
-        lastEvent: "The game has begun!",
-        playerAnswering: null,
-        currentQuestionSet: null,
-        currentQuestionIndex: null,
-        answeredQuestions: []
+        lastEvent: '',
+        answeredQuestions: [],
+      },
+      interval: null,
+      gameType: null,
     };
-    game.clients.forEach(client => {
-        game.state[client.player] = { steps: 0 };
-    });
-
-    const startPayload = { method: "start", game: game };
-    game.clients.forEach((client) => {
-        clients[client.clientId].connection.send(JSON.stringify(startPayload));
-    });
+  }
+  return games[gameId];
 }
 
-function broadcastUpdate(gameId) {
-    const game = games[gameId];
-    if (!game) return;
-    const updatePayload = { method: "update", game: game };
-    game.clients.forEach((client) => {
-        if(clients[client.clientId]) {
-            clients[client.clientId].connection.send(JSON.stringify(updatePayload));
+function startBroadcaster(gameId) {
+  const g = games[gameId];
+  if (!g) return;
+  if (g.interval) return; // already broadcasting
+  g.interval = setInterval(() => {
+    broadcastGameState(gameId);
+  }, BROADCAST_INTERVAL_MS);
+}
+
+function stopBroadcaster(gameId) {
+  const g = games[gameId];
+  if (!g) return;
+  if (g.interval) {
+    clearInterval(g.interval);
+    g.interval = null;
+  }
+}
+
+function broadcastGameState(gameId) {
+  const g = games[gameId];
+  if (!g) return;
+
+  // Build clients summary array
+  const clientsArr = g.clients.map(c => ({ clientId: c.clientId, playerKey: c.playerKey }));
+
+  // Build state payload with p1..pn and animals mapping
+  const state = {
+    status: g.state.status,
+    currentPlayerIndex: g.state.currentPlayerIndex,
+    lastEvent: g.state.lastEvent,
+    answeredQuestions: g.state.answeredQuestions || [],
+    animals: {}
+  };
+
+  for (let i = 0; i < g.clients.length; i++) {
+    const pKey = `p${i + 1}`;
+    const client = g.clients[i];
+    const info = g.byClient[client.clientId];
+    state[pKey] = { steps: info.steps || 0 };
+    state.animals[pKey] = info.animal || 'default';
+  }
+
+  const payload = {
+    method: 'update',
+    game: {
+      id: gameId,
+      clients: clientsArr,
+      state: state,
+      gameType: g.gameType
+    }
+  };
+
+  const msg = JSON.stringify(payload);
+
+  for (const c of g.clients) {
+    try {
+      if (c.ws && c.ws.readyState === WebSocket.OPEN) {
+        c.ws.send(msg);
+      }
+    } catch (e) {
+      // ignore send issues for flaky clients
+    }
+  }
+}
+
+// Helper to assign next available playerKey (p1..pN)
+function assignPlayerKey(g) {
+  for (let i = 1; i <= MAX_PLAYERS; i++) {
+    const key = `p${i}`;
+    const exists = g.clients.some(c => c.playerKey === key);
+    if (!exists) return key;
+  }
+  return null;
+}
+
+wss.on('connection', (ws) => {
+  let clientId = null;
+  let myGameId = null;
+
+  ws.on('message', (raw) => {
+    let msg;
+    try {
+      msg = JSON.parse(raw);
+    } catch (err) {
+      console.error('Invalid JSON:', raw);
+      return;
+    }
+
+    const method = msg.method;
+
+    // Client announces itself - optional but keeps protocol explicit
+    if (method === 'connect') {
+      clientId = msg.clientId || msg.client || generateClientId();
+      // echo connect
+      const out = { method: 'connect', clientId };
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(out));
+      return;
+    }
+
+    // find_game - client wants to join a game type
+    if (method === 'find_game') {
+      clientId = msg.clientId || clientId || generateClientId();
+      const gameType = msg.gameType || 'jungle';
+      const gameId = makeGameId(gameType);
+      myGameId = gameId;
+      const g = ensureGame(gameId);
+      g.gameType = gameType;
+
+      // If not registered, add
+      if (!g.byClient[clientId]) {
+        const nextPlayerKey = assignPlayerKey(g);
+        if (!nextPlayerKey) {
+          // Game full, reject
+          const out = { method: 'error', message: 'Game is full' };
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(out));
+          return;
         }
-    });
-}
+        g.clients.push({ clientId, ws, playerKey: nextPlayerKey });
+        g.byClient[clientId] = { ws, playerKey: nextPlayerKey, steps: 0, animal: 'default' };
+        g.state.lastEvent = `${nextPlayerKey} joined`;
+      } else {
+        // client already present - update ws in case it reconnected
+        g.byClient[clientId].ws = ws;
+        const existing = g.clients.find(c => c.clientId === clientId);
+        if (existing) existing.ws = ws;
+      }
 
-function guid() {
-    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
-        const r = (Math.random() * 16) | 0;
-        const v = c === "x" ? r : (r & 0x3) | 0x8;
-        return v.toString(16);
-    });
-}
+      // Send join back
+      const joinPayload = {
+        method: 'join',
+        clientId,
+        player: g.byClient[clientId].playerKey,
+        game: { id: gameId, gameType }
+      };
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(joinPayload));
 
-server.listen(9090, () => {
-    console.log("Game Server is listening on port 9090");
+      // If >=2 players, mark playing and start broadcaster
+      if (g.clients.length >= 2) {
+        g.state.status = 'playing';
+        startBroadcaster(gameId);
+      }
+
+      // Immediately broadcast state so everyone sees new player
+      broadcastGameState(gameId);
+      return;
+    }
+
+    // animal_select
+    if (method === 'animal_select') {
+      clientId = msg.clientId || clientId;
+      const chosen = msg.animal || 'default';
+      const gameId = msg.gameId || myGameId;
+      if (!gameId) return;
+      const g = games[gameId];
+      if (!g) return;
+      if (!g.byClient[clientId]) return;
+
+      g.byClient[clientId].animal = chosen;
+      g.state.lastEvent = `${g.byClient[clientId].playerKey} selected ${chosen}`;
+      // Broadcast immediately so clients update visuals
+      broadcastGameState(gameId);
+      return;
+    }
+
+    // play (roll)
+    if (method === 'play') {
+      clientId = msg.clientId || clientId;
+      const gameId = msg.gameId || myGameId;
+      if (!gameId) return;
+      const g = games[gameId];
+      if (!g || !g.byClient[clientId]) return;
+
+      // Simple play logic — increment steps
+      g.byClient[clientId].steps = (g.byClient[clientId].steps || 0) + 1;
+      g.state.lastEvent = `${g.byClient[clientId].playerKey} played`;
+
+      // advance currentPlayerIndex round-robin
+      const idx = g.clients.findIndex(c => c.clientId === clientId);
+      if (idx >= 0) {
+        g.state.currentPlayerIndex = (idx + 1) % Math.max(1, g.clients.length);
+      }
+
+      // broadcast updated state
+      broadcastGameState(gameId);
+      return;
+    }
+
+    // submit_answer
+    if (method === 'submit_answer') {
+      clientId = msg.clientId || clientId;
+      const gameId = msg.gameId || myGameId;
+      if (!gameId) return;
+      const g = games[gameId];
+      if (!g) return;
+
+      const answer = msg.answer || '';
+      const record = {
+        question: msg.question || 'Q',
+        providedAnswer: answer,
+        correctAnswer: msg.correctAnswer || '',
+        wasCorrect: false,
+        player: (g.byClient[clientId] && g.byClient[clientId].playerKey) || 'unknown'
+      };
+
+      g.state.answeredQuestions = g.state.answeredQuestions || [];
+      g.state.answeredQuestions.push(record);
+      g.state.lastEvent = `${record.player} answered`;
+
+      // broadcast updated state
+      broadcastGameState(gameId);
+      return;
+    }
+
+    // other handlers can go here...
+  });
+
+  ws.on('close', () => {
+    // Remove client from any game they're in
+    for (const [gameId, g] of Object.entries(games)) {
+      const idx = g.clients.findIndex(c => c.ws === ws || c.clientId === clientId);
+      if (idx !== -1) {
+        const removed = g.clients.splice(idx, 1)[0];
+        if (removed && g.byClient && g.byClient[removed.clientId]) {
+          delete g.byClient[removed.clientId];
+        }
+        g.state.lastEvent = `${removed.playerKey} left`;
+        // If no players left, clean up game
+        if (g.clients.length === 0) {
+          stopBroadcaster(gameId);
+          delete games[gameId];
+        } else {
+          broadcastGameState(gameId);
+        }
+        break;
+      }
+    }
+  });
+
 });
+
+// small helper to produce a client id if client didn't supply one
+function generateClientId() {
+  return 'c_' + Math.random().toString(36).substring(2, 10);
+}
+
+console.log(`Game Server is listening on port ${PORT}`);
