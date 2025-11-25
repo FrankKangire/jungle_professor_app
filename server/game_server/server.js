@@ -1,10 +1,11 @@
 // server/game_server/server.js
 // Unified WebSocket server for Jungle Professor + City Tour
-// Uses correct Render-compatible architecture (Express + HTTP + WS)
+// Express + HTTP + WebSocket (Render-compatible) with verbose debugging logs (Option A)
 
 const http = require("http");
 const express = require("express");
 const WebSocket = require("ws");
+const { v4: uuidv4 } = require('uuid'); // lightweight unique id generator (add to package.json if needed)
 
 const app = express();
 const server = http.createServer(app);        // HTTP server for Render
@@ -12,13 +13,13 @@ const wss = new WebSocket.Server({ server }); // WebSocket attached to HTTP
 
 // CONFIG
 const PORT = process.env.PORT || 10000;
-const MAX_PLAYERS = 2;
-const BROADCAST_INTERVAL_MS = 1000;
+const MAX_PLAYERS = 4;                // scalable to 4 players
+const BROADCAST_INTERVAL_MS = 1000;   // update broadcast interval
 const DELAY_BEFORE_QUIZ = 2000;
 
 // In-memory state
 const clients = {};  // clientId -> ws
-const games = {};    // gameId   -> { players: {}, state... }
+const games = {};    // gameId   -> { id, players: {clientId: {position,animal}}, state... }
 
 const allQuestions = {
     // --- JUNGLE PROFESSOR QUESTIONS ---
@@ -223,165 +224,409 @@ const questionPositions = {
     34: { jungle: ['j_tiger1', 'j_tiger2', 'j_tiger3'], city: ['c_wall1', 'c_wall2', 'c_wall3'] },
 };
 
-// Utility: Makes a new empty game object
-function createGame(gameId) {
-    return {
-        id: gameId,
-        players: {},       // clientId -> { position, animal }
-        currentTurn: 1,
-        started: false,
-        createdAt: Date.now()
-    };
-}
-
-// Utility: Picks the first available game that needs players
-function findAvailableGame() {
-    for (const gameId in games) {
-        const g = games(gameId);
-        if (Object.keys(g.players).length < MAX_PLAYERS) {
-            return g;
-        }
-    }
+// Helper: safe JSON parse with logging
+function safeParse(msg) {
+  try {
+    return JSON.parse(msg);
+  } catch (err) {
+    console.warn("[safeParse] invalid JSON:", msg);
     return null;
+  }
 }
 
-// Broadcast state of a game to all players inside it
-function broadcastGameState(game) {
-    const payload = {
-        type: "update",
-        gameId: game.id,
-        players: game.players,
-        currentTurn: game.currentTurn
-    };
+// Utility: generate a new client id if needed
+function makeClientId() {
+  // use uuid if available; fallback to timestamp random
+  try {
+    return "client_" + uuidv4();
+  } catch (e) {
+    return "client_" + Date.now() + "_" + Math.random().toString(36).substr(2, 6);
+  }
+}
 
-    const payloadString = JSON.stringify(payload);
+// Utility: Makes a new empty game object
+function createGame(gameId, gameType = 'jungle') {
+  console.log(`[createGame] creating game ${gameId} type=${gameType}`);
+  return {
+    id: gameId,
+    gameType,
+    players: {}, // clientId -> { playerKey: 'p1', steps: 0, animal: 'default' }
+    state: {
+      status: 'waiting', // 'waiting' | 'playing' | 'finished'
+      currentPlayerIndex: 0,
+      lastEvent: '',
+      answeredQuestions: []
+    },
+    createdAt: Date.now(),
+    broadcastInterval: null
+  };
+}
+
+// Utility: Find a game with open slot or null
+function findAvailableGame(gameType = 'jungle') {
+  for (const gameId in games) {
+    const g = games[gameId];
+    if (!g) continue;
+    if (g.gameType === gameType && Object.keys(g.players).length < MAX_PLAYERS && g.state.status !== 'finished') {
+      console.log(`[findAvailableGame] found open game ${gameId} (players=${Object.keys(g.players).length})`);
+      return g;
+    }
+  }
+  console.log("[findAvailableGame] no available game found");
+  return null;
+}
+
+// Utility: assign next slot key p1..p4
+function assignPlayerKey(game) {
+  for (let i = 1; i <= MAX_PLAYERS; i++) {
+    const key = `p${i}`;
+    const used = Object.values(game.players).some(p => p.playerKey === key);
+    if (!used) return key;
+  }
+  return null;
+}
+
+// Build state payload for a game (keeps format client expects)
+function buildGamePayload(game) {
+  // create ordered clients list and state p1..pn
+  const clientsList = [];
+  const state = {
+    status: game.state.status,
+    currentPlayerIndex: game.state.currentPlayerIndex,
+    lastEvent: game.state.lastEvent,
+    answeredQuestions: game.state.answeredQuestions || [],
+    animals: {}
+  };
+
+  const playerKeys = Object.values(game.players).map(p => p.playerKey);
+  // we need p1..pN mapping and animals map for client
+  const orderedPlayers = {}; // p1: {steps:..., animal:...}
+  // Convert players object to an ordered array by playerKey numeric suffix
+  for (const clientId in game.players) {
+    const p = game.players[clientId];
+    clientsList.push({ clientId, playerKey: p.playerKey });
+    const key = p.playerKey;
+    orderedPlayers[key] = { steps: p.steps || 0 };
+    state.animals[key] = p.animal || 'default';
+  }
+
+  // Fill missing pN keys up to MAX_PLAYERS with defaults (not strictly necessary)
+  for (let i = 1; i <= Object.keys(game.players).length; i++) {
+    const key = `p${i}`;
+    if (!orderedPlayers.hasOwnProperty(key)) orderedPlayers[key] = { steps: 0 };
+  }
+
+  // Attach p1..pn in state as client expects
+  for (const k of Object.keys(orderedPlayers)) {
+    state[k] = orderedPlayers[k];
+  }
+
+  const payload = {
+    method: "update",
+    game: {
+      id: game.id,
+      clients: clientsList,
+      state,
+      gameType: game.gameType
+    }
+  };
+  return payload;
+}
+
+// Broadcast state for a single game
+function broadcastGameState(game) {
+  try {
+    const payload = buildGamePayload(game);
+    const msg = JSON.stringify(payload);
+    console.log(`[broadcastGameState] game=${game.id} sending update -> ${msg}`);
 
     for (const clientId in game.players) {
-        const ws = clients[clientId];
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(payloadString);
-        }
+      const ws = clients[clientId];
+      if (!ws) {
+        console.warn(`[broadcastGameState] missing ws for clientId=${clientId}`);
+        continue;
+      }
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(msg, (err) => {
+          if (err) console.error(`[broadcastGameState] error sending to ${clientId}:`, err);
+        });
+      } else {
+        console.log(`[broadcastGameState] ws not open for ${clientId}, readyState=${ws.readyState}`);
+      }
     }
+  } catch (err) {
+    console.error("[broadcastGameState] error:", err);
+  }
 }
 
-// Main WebSocket handling
-wss.on("connection", (ws) => {
-    console.log("Client connected!");
+// Start periodic broadcast for a game (if not already started)
+function ensureBroadcastLoop(game) {
+  if (game.broadcastInterval) return;
+  console.log(`[ensureBroadcastLoop] starting interval for game ${game.id}`);
+  game.broadcastInterval = setInterval(() => {
+    broadcastGameState(game);
+  }, BROADCAST_INTERVAL_MS);
+}
 
-    ws.on("message", (msg) => {
-        let data;
-        try {
-            data = JSON.parse(msg);
-        } catch (err) {
-            console.log("Invalid JSON:", msg);
-            return;
-        }
+// Stop broadcast interval when game removed/finished
+function stopBroadcastLoop(game) {
+  if (game.broadcastInterval) {
+    clearInterval(game.broadcastInterval);
+    game.broadcastInterval = null;
+    console.log(`[stopBroadcastLoop] stopped interval for game ${game.id}`);
+  }
+}
 
-        const type = data.type;
-        const clientId = data.clientId;
+// Remove a client from all games (clean up)
+function removeClientFromGames(clientId) {
+  for (const gid in games) {
+    const g = games[gid];
+    if (!g) continue;
+    if (g.players && g.players[clientId]) {
+      console.log(`[removeClientFromGames] removing ${clientId} from game ${gid}`);
+      delete g.players[clientId];
+      g.state.lastEvent = `${clientId} disconnected`;
+      // If no players left, clear game
+      if (Object.keys(g.players).length === 0) {
+        stopBroadcastLoop(g);
+        console.log(`[removeClientFromGames] deleting empty game ${gid}`);
+        delete games[gid];
+      } else {
+        broadcastGameState(g);
+      }
+    }
+  }
+}
 
-        // --------------------------
-        // REGISTER NEW CLIENT
-        // --------------------------
-        if (type === "connect") {
-            clients[clientId] = ws;
-            console.log(`Client ${clientId} registered`);
-            return;
-        }
-
-        // --------------------------
-        // FIND OR CREATE GAME
-        // --------------------------
-        if (type === "find_game") {
-            let game = findAvailableGame();
-            if (!game) {
-                const newGameId = "game_" + Date.now();
-                game = games[newGameId] = createGame(newGameId);
-            }
-
-            game.players[clientId] = {
-                position: 0,
-                animal: null   // chosen later
-            };
-
-            ws.send(JSON.stringify({
-                type: "game_found",
-                gameId: game.id
-            }));
-
-            return;
-        }
-
-        // --------------------------
-        // ANIMAL SELECTION
-        // --------------------------
-        if (type === "animal_select") {
-            const { gameId, animal } = data;
-            const game = games[gameId];
-
-            if (!game) return;
-
-            if (!game.players[clientId]) return;
-
-            game.players[clientId].animal = animal;
-
-            // Notify only this user they selected successfully
-            ws.send(JSON.stringify({
-                type: "animal_selected",
-                success: true,
-                animal
-            }));
-
-            return;
-        }
-
-        // --------------------------
-        // PLAYER MOVEMENT UPDATE
-        // (your original play logic)
-        // --------------------------
-        if (type === "play") {
-            const { gameId, position } = data;
-            const game = games[gameId];
-
-            if (!game) return;
-            if (!game.players[clientId]) return;
-
-            // update board position
-            game.players[clientId].position = position;
-
-            return;
-        }
-
-        // --------------------------
-        // QUIZ SUBMISSION (unchanged)
-        // --------------------------
-        if (type === "submit_answer") {
-            const { gameId, questionId, answer } = data;
-            const game = games[gameId];
-            if (!game) return;
-
-            ws.send(JSON.stringify({
-                type: "answer_result",
-                questionId,
-                correct: true // TODO adjust if needed
-            }));
-        }
-    });
-
-    ws.on("close", () => {
-        console.log("Client disconnected");
-    });
+// Accept HTTP GET at / to show server is alive
+app.get('/', (req, res) => {
+  res.setHeader('Content-Type', 'text/plain');
+  res.end('Jungle Professor Game Server is running.\n');
 });
 
-// Broadcast loop
-setInterval(() => {
-    for (const gameId in games) {
-        const game = games[gameId];
-        broadcastGameState(game);
-    }
-}, BROADCAST_INTERVAL_MS);
+// -------------------- WebSocket handling --------------------
+wss.on('connection', (ws, req) => {
+  const remote = req.socket.remoteAddress + ":" + req.socket.remotePort;
+  console.log(`[WS] new raw connection from ${remote}, wsId=${Math.random().toString(36).substr(2,6)}`);
 
-// Start server
+  // Optionally send a welcome/connect message with a server-generated clientId
+  const serverGeneratedClientId = makeClientId();
+  ws.send(JSON.stringify({ method: 'connected', clientId: serverGeneratedClientId }));
+  console.log(`[WS] sent initial connected message with clientId=${serverGeneratedClientId} to ${remote}`);
+
+  ws.on('message', (message) => {
+    console.log(`[WS message] raw from ${remote}:`, message?.toString?.() ?? message);
+
+    const data = safeParse(message);
+    if (!data) return;
+
+    // Accept both 'method' and 'type' naming (compatibility)
+    const method = data.method || data.type;
+    let clientId = data.clientId || data.client_id || null;
+
+    // If client didn't give an id, assign one and inform them
+    if (!clientId) {
+      clientId = serverGeneratedClientId;
+      // persist mapping so future broadcast sends to this ws
+      clients[clientId] = ws;
+      console.log(`[WS message] client did not provide clientId; assigned ${clientId}`);
+      // also echo back to client
+      try {
+        ws.send(JSON.stringify({ method: 'assign_client_id', clientId }));
+      } catch (e) {
+        console.warn("[WS message] unable to send assign_client_id", e);
+      }
+    } else {
+      // ensure mapping exists/updates to this ws
+      clients[clientId] = ws;
+    }
+
+    console.log(`[handle] method=${method} clientId=${clientId} payload=`, data);
+
+    // ---------- handle find_game ----------
+    if (method === 'find_game' || method === 'join') {
+      const gameType = data.gameType || data.game_type || 'jungle';
+      console.log(`[find_game] requested by client ${clientId} for type=${gameType}`);
+
+      // try to find an available game
+      let game = findAvailableGame(gameType);
+      if (!game) {
+        const newGameId = `game_${Date.now()}`;
+        game = createGame(newGameId, gameType);
+        games[newGameId] = game;
+        console.log(`[find_game] created game ${newGameId}`);
+      }
+
+      // assign a playerKey and add player if not already present
+      if (!game.players[clientId]) {
+        const playerKey = assignPlayerKey(game);
+        game.players[clientId] = { playerKey, steps: 0, animal: 'default' };
+        console.log(`[find_game] added client ${clientId} as ${playerKey} to game ${game.id}`);
+      } else {
+        console.log(`[find_game] client ${clientId} already in game ${game.id}`);
+      }
+
+      // if players reach 2 or more, change state to playing and start broadcasting
+      const playerCount = Object.keys(game.players).length;
+      if (playerCount >= 2) {
+        game.state.status = 'playing';
+        console.log(`[find_game] game ${game.id} now playing (players=${playerCount})`);
+        ensureBroadcastLoop(game);
+      }
+
+      // reply to the client who requested
+      try {
+        const reply = {
+          method: 'join',
+          clientId,
+          player: game.players[clientId].playerKey,
+          game: { id: game.id, gameType: game.gameType }
+        };
+        ws.send(JSON.stringify(reply));
+        console.log(`[find_game] reply sent to ${clientId}:`, reply);
+      } catch (e) {
+        console.error('[find_game] error sending join reply', e);
+      }
+
+      // broadcast state to all players in this game immediately
+      broadcastGameState(game);
+      return;
+    }
+
+    // ---------- handle animal_select ----------
+    if (method === 'animal_select') {
+      const { gameId, animal } = data;
+      if (!gameId) {
+        console.warn('[animal_select] missing gameId in payload');
+        return;
+      }
+      const game = games[gameId];
+      if (!game) {
+        console.warn(`[animal_select] game ${gameId} not found`);
+        return;
+      }
+      if (!game.players[clientId]) {
+        console.warn(`[animal_select] client ${clientId} not in game ${gameId}`);
+        return;
+      }
+
+      game.players[clientId].animal = animal;
+      game.state.lastEvent = `${game.players[clientId].playerKey} selected ${animal}`;
+      console.log(`[animal_select] game=${gameId} client=${clientId} animal=${animal}`);
+      // ack to the client
+      try {
+        ws.send(JSON.stringify({ method: 'animal_selected', clientId, animal, success: true }));
+      } catch (e) { console.warn('[animal_select] ack send failed', e); }
+
+      // broadcast updated state to all players
+      broadcastGameState(game);
+      return;
+    }
+
+    // ---------- handle play (movement) ----------
+    if (method === 'play') {
+      const { gameId } = data;
+      if (!gameId) {
+        console.warn('[play] missing gameId');
+        return;
+      }
+      const game = games[gameId];
+      if (!game) {
+        console.warn(`[play] game ${gameId} not found`);
+        return;
+      }
+      if (!game.players[clientId]) {
+        console.warn(`[play] client ${clientId} not in game ${gameId}`);
+        return;
+      }
+
+      // Example movement: increment steps by 1 (your existing logic may differ)
+      game.players[clientId].steps = (game.players[clientId].steps || 0) + 1;
+      game.state.lastEvent = `${game.players[clientId].playerKey} advanced to ${game.players[clientId].steps}`;
+      console.log(`[play] game=${gameId} client=${clientId} steps=${game.players[clientId].steps}`);
+
+      // Update currentPlayerIndex: find index of this player's playerKey among players
+      const playerKeys = Object.values(game.players).map(p => p.playerKey);
+      const idx = playerKeys.indexOf(game.players[clientId].playerKey);
+      if (idx >= 0) {
+        game.state.currentPlayerIndex = (idx + 1) % Math.max(1, Object.keys(game.players).length);
+      }
+
+      broadcastGameState(game);
+      return;
+    }
+
+    // ---------- handle submit_answer ----------
+    if (method === 'submit_answer') {
+      const { gameId, answer, questionId } = data;
+      if (!gameId) {
+        console.warn('[submit_answer] missing gameId');
+        return;
+      }
+      const game = games[gameId];
+      if (!game) {
+        console.warn(`[submit_answer] game ${gameId} not found`);
+        return;
+      }
+      // store the answer in state (very simple)
+      game.state.answeredQuestions = game.state.answeredQuestions || [];
+      const record = {
+        player: game.players[clientId] ? game.players[clientId].playerKey : 'unknown',
+        questionId,
+        providedAnswer: answer,
+        correctAnswer: null,
+        wasCorrect: false,
+        timestamp: Date.now()
+      };
+      game.state.answeredQuestions.push(record);
+      game.state.lastEvent = `${record.player} answered question ${questionId}`;
+      console.log('[submit_answer] stored record:', record);
+
+      // reply ack with a dummy correct=true for now
+      try {
+        ws.send(JSON.stringify({ method: 'answer_received', questionId, correct: true }));
+      } catch (e) { console.warn('[submit_answer] ack send failed', e); }
+
+      broadcastGameState(game);
+      return;
+    }
+
+    // ---------- fallback/unhandled ----------
+    console.log(`[unhandled] method=${method} payload=`, data);
+  });
+
+  ws.on('close', (code, reason) => {
+    console.log(`[WS close] connection closed from ${remote} code=${code} reason=${reason}`);
+    // Attempt to remove this ws from clients mapping (match by value)
+    for (const cid in clients) {
+      if (clients[cid] === ws) {
+        console.log(`[WS close] removing client mapping for ${cid}`);
+        delete clients[cid];
+        removeClientFromGames(cid);
+        break;
+      }
+    }
+  });
+
+  ws.on('error', (err) => {
+    console.error(`[WS error] remote=${remote}`, err);
+  });
+});
+
+// Periodic safeguard broadcast (global) — also logs tick
+setInterval(() => {
+  // Log heartbeat
+  console.log(`[heartbeat] games=${Object.keys(games).length} clients=${Object.keys(clients).length}`);
+  for (const gid in games) {
+    const g = games[gid];
+    if (g) {
+      // broadcast each game state (this ensures clients get updates)
+      broadcastGameState(g);
+    }
+  }
+}, BROADCAST_INTERVAL_MS * 5);
+
+// Start HTTP + WS server
 server.listen(PORT, () => {
-    console.log(`Server listening on port ${PORT}`);
+  console.log(`Server listening on port ${PORT} (process.env.PORT=${process.env.PORT})`);
 });
