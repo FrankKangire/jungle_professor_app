@@ -1,4 +1,4 @@
-olympic@olympic-book:~/jungle_professor$ cat lib/main.dart
+// lib/main.dart
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
@@ -8,6 +8,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:share_plus/share_plus.dart';
 
 // --- LIVE SERVER CONFIGURATION ---
+// NOTE: Render assigned port is typically required in the client URL (e.g. :10000)
+// Update the port if your Render service indicates a different primary port.
 const String PHP_API_URL = "https://jungle-professor-api.onrender.com";
 const String WEBSOCKET_URL = "wss://jungle-professor-game-server.onrender.com";
 
@@ -96,21 +98,11 @@ class AppMenu extends StatelessWidget implements PreferredSizeWidget {
             return actions.map((MenuAction choice) {
               String text = '';
               switch (choice) {
-                case MenuAction.home:
-                  text = 'Home';
-                  break;
-                case MenuAction.login:
-                  text = 'Login';
-                  break;
-                case MenuAction.signup:
-                  text = 'Sign Up';
-                  break;
-                case MenuAction.logout:
-                  text = 'Logout';
-                  break;
-                case MenuAction.myResults:
-                  text = 'My Results';
-                  break;
+                case MenuAction.home: text = 'Home'; break;
+                case MenuAction.login: text = 'Login'; break;
+                case MenuAction.signup: text = 'Sign Up'; break;
+                case MenuAction.logout: text = 'Logout'; break;
+                case MenuAction.myResults: text = 'My Results'; break;
               }
               return PopupMenuItem<MenuAction>(
                 value: choice,
@@ -257,7 +249,8 @@ class _SignupPageState extends State<SignupPage> {
         if (data['status'] == 'success') {
           final prefs = await SharedPreferences.getInstance();
           await prefs.setString('username', data['username']);
-          Navigator.of(context).pushNamedAndRemoveUntil('/animal_select', (route) => false);
+          // After signup we route to welcome page; user will choose game and then join.
+          Navigator.of(context).pushNamedAndRemoveUntil('/welcome', (route) => false);
         } else {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(data['message'])));
         }
@@ -404,20 +397,20 @@ class _GameSelectionPageState extends State<GameSelectionPage> {
     _streamListener = _broadcastController!.stream.listen((message) {
       if (!mounted) return;
       final data = jsonDecode(message);
-      final method = data['method'];
+      final method = data['method'] ?? data['type'];
 
-      if (method == 'connect') {
-        _clientId = data['clientId'];
+      if (method == 'connect' || method == 'connected') {
+        _clientId = data['clientId'] ?? data['clientId'];
         setState(() => _statusMessage = 'Finding a $gameType game...');
         _channel!.sink.add(jsonEncode({
           'method': 'find_game',
           'clientId': _clientId,
           'gameType': gameType
         }));
-      } else if (method == 'join') {
-        _playerIdentifier = data['player'];
+      } else if (method == 'join' || method == 'game_found') {
+        _playerIdentifier = data['player'] ?? data['assignedPlayerId'] ?? data['assignedPlayerId'];
         setState(() => _statusMessage = 'Joined Game! Select your animal...');
-        // Navigate to animal selection
+        // Navigate to animal selection (Option A: after join & waiting)
         Navigator.pushReplacementNamed(
           context,
           '/animal_select',
@@ -426,10 +419,12 @@ class _GameSelectionPageState extends State<GameSelectionPage> {
             'stream': _broadcastController!.stream,
             'clientId': _clientId,
             'player': _playerIdentifier,
-            'gameId': data['game']['id'],
+            'gameId': data['game'] != null ? data['game']['id'] : data['gameId'] ?? data['gameId'],
             'gameType': gameType,
           },
         );
+      } else if (method == 'update') {
+        // If server sends update before join flow completes, ignore here
       }
     });
   }
@@ -516,7 +511,7 @@ class _AnimalSelectionPageState extends State<AnimalSelectionPage> {
           clientId: clientId,
           player: player,
           gameType: gameType,
-          initialGameData: null, // let server send update with initial data
+          initialGameData: null, // server will send first update
         ),
       ),
     );
@@ -536,12 +531,10 @@ class _AnimalSelectionPageState extends State<AnimalSelectionPage> {
             child: InkWell(
               onTap: () => _selectAnimal(animal),
               child: Center(
-                // Placeholder: you should add asset images later
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // replace this with Image.asset('assets/animals/$animal.png')
-                    Icon(Icons.pets, size: 50),
+                    Image.asset('animals/$animal.jpg', height: 80, width: 80, fit: BoxFit.cover),
                     const SizedBox(height: 8),
                     Text(animal.toUpperCase(), style: const TextStyle(fontSize: 18)),
                   ],
@@ -592,6 +585,8 @@ class _GamePageState extends State<GamePage> {
   List<Map<String, dynamic>> _currentResults = [];
   Map<String, String> playerAnimal = {};
 
+  final List<Color> playerColors = [Colors.blue, Colors.yellow, Colors.red, Colors.green];
+
   @override
   void initState() {
     super.initState();
@@ -601,7 +596,8 @@ class _GamePageState extends State<GamePage> {
     _gamePageListener = widget.stream.listen((message) {
       if (!mounted) return;
       final data = jsonDecode(message);
-      final method = data['method'];
+      final method = data['method'] ?? data['type'];
+
       if (method == 'update') {
         _updateStateFromServer(data);
       } else if (method == 'ask_question') {
@@ -632,15 +628,16 @@ class _GamePageState extends State<GamePage> {
   }
 
   void _updateStateFromServer(Map<String, dynamic> data) {
-    final game = data['game'];
-    final gameState = game['state'];
-    final clients = game['clients'] as List;
+    // Expected server update format: { method: 'update', game: { id, clients, state } }
+    final game = data['game'] ?? data;
+    final gameState = game['state'] ?? game['state'];
+    final clients = game['clients'] as List? ?? [];
 
     if (mounted) {
       setState(() {
-        gameStatus = gameState['status'];
+        gameStatus = gameState['status'] ?? 'playing';
         totalPlayers = clients.length;
-        currentPlayerIndex = gameState['currentPlayerIndex'];
+        currentPlayerIndex = gameState['currentPlayerIndex'] ?? 0;
         _lastEventText = gameState['lastEvent'] ?? "Your turn!";
 
         if (gameState['answeredQuestions'] != null) {
@@ -651,13 +648,18 @@ class _GamePageState extends State<GamePage> {
         for (var i = 0; i < totalPlayers; i++) {
           String playerKey = 'p${i + 1}';
           if (gameState.containsKey(playerKey)) {
-            playerSteps[playerKey] = gameState[playerKey]['steps'];
+            final p = gameState[playerKey];
+            if (p != null && p['steps'] != null) {
+              playerSteps[playerKey] = p['steps'] as int;
+            } else {
+              playerSteps[playerKey] = 0;
+            }
           }
         }
 
-        // store animal selection per player
+        // store animal selection per player (if present)
         if (gameState.containsKey('animals')) {
-          final Map<String, dynamic> animalsMap = gameState['animals'];
+          final Map<String, dynamic> animalsMap = Map<String, dynamic>.from(gameState['animals']);
           for (var entry in animalsMap.entries) {
             playerAnimal[entry.key] = entry.value as String;
           }
@@ -683,25 +685,104 @@ class _GamePageState extends State<GamePage> {
     }));
   }
 
+  // show question popup (fixes missing method error)
+  void _showQuestionPopup(Map<String, dynamic> data) {
+    final String question = data['question'] ?? 'Question';
+    final String playerAnswering = data['playerAnswering'] ?? '';
+    final int qNum = data['questionNumber'] ?? 1;
+    final int qTotal = data['totalQuestions'] ?? 1;
+    final answerController = TextEditingController();
+    final bool amIAnswering = widget.player == playerAnswering;
+
+    if (!mounted) return;
+    setState(() => _isPopupVisible = true);
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          title: Text("Question $qNum of $qTotal for ${playerAnswering.toUpperCase()}"),
+          content: SingleChildScrollView(
+            child: ListBody(children: <Widget>[
+              Text(question, style: const TextStyle(fontSize: 18)),
+              const SizedBox(height: 20),
+              if (amIAnswering)
+                TextField(
+                  controller: answerController,
+                  autofocus: true,
+                  decoration: const InputDecoration(labelText: 'Your Answer', border: OutlineInputBorder()),
+                )
+              else
+                const Text("Waiting for their answer...")
+            ]),
+          ),
+          actions: <Widget>[
+            if (amIAnswering)
+              TextButton(
+                child: const Text('Submit', style: TextStyle(fontSize: 16)),
+                onPressed: () {
+                  _sendAnswer(answerController.text);
+                  Navigator.of(dialogContext).pop();
+                },
+              ),
+          ],
+        );
+      },
+    ).then((_) {
+      if (mounted) setState(() => _isPopupVisible = false);
+    });
+  }
+
   Offset calculatePlayerPosition(int steps) {
     double xPos = 0.0, yPos = 0.0;
     if (minDimension > 0) {
       xPos = initialPosition.dx;
       yPos = initialPosition.dy;
     }
+
     int effectiveSteps = steps > 0 ? (steps % 34 == 0 ? 33 : steps % 34) : 0;
-    // (your existing logic for step -> coordinate mapping)
-    // ... (keep your existing mapping here)
-    // for brevity, not rewriting all cases — but you should preserve them
+    if (effectiveSteps == 0) { return Offset(xPos, yPos); }
+    if (effectiveSteps == 1) { xPos = minDimension * 0.218; }
+    if (effectiveSteps == 2) { xPos = minDimension * 0.332; }
+    if (effectiveSteps == 3) { xPos = minDimension * 0.452; }
+    if (effectiveSteps == 4) { xPos = minDimension * 0.564; }
+    if (effectiveSteps == 5) { xPos = minDimension * 0.678; }
+    if (effectiveSteps == 6) { xPos = minDimension * 0.845; }
+    if (effectiveSteps == 7) { xPos = minDimension * 0.845; yPos = minDimension * 0.688; }
+    if (effectiveSteps == 8) { xPos = minDimension * 0.845; yPos = minDimension * 0.574; }
+    if (effectiveSteps == 9) { xPos = minDimension * 0.845; yPos = minDimension * 0.460; }
+    if (effectiveSteps == 10) { xPos = minDimension * 0.845; yPos = minDimension * 0.346; }
+    if (effectiveSteps == 11) { xPos = minDimension * 0.845; yPos = minDimension * 0.232; }
+    if (effectiveSteps == 12) { xPos = minDimension * 0.845; yPos = minDimension * 0.065; }
+    if (effectiveSteps == 13) { xPos = minDimension * 0.678; yPos = minDimension * 0.065; }
+    if (effectiveSteps == 14) { xPos = minDimension * 0.564; yPos = minDimension * 0.065; }
+    if (effectiveSteps == 15) { xPos = minDimension * 0.452; yPos = minDimension * 0.065; }
+    if (effectiveSteps == 16) { xPos = minDimension * 0.332; yPos = minDimension * 0.065; }
+    if (effectiveSteps == 17) { xPos = minDimension * 0.218; yPos = minDimension * 0.065; }
+    if (effectiveSteps == 18) { xPos = minDimension * 0.055; yPos = minDimension * 0.065; }
+    if (effectiveSteps == 19) { xPos = minDimension * 0.055; yPos = minDimension * 0.232; }
+    if (effectiveSteps == 20) { xPos = minDimension * 0.055; yPos = minDimension * 0.346; }
+    if (effectiveSteps == 21) { xPos = minDimension * 0.055; yPos = minDimension * 0.460; }
+    if (effectiveSteps == 22) { xPos = minDimension * 0.055; yPos = minDimension * 0.574; }
+    if (effectiveSteps == 23) { xPos = minDimension * 0.055; yPos = minDimension * 0.688; }
+    if (effectiveSteps == 24) { xPos = minDimension * 0.213; yPos = minDimension * 0.688; }
+    if (effectiveSteps == 25) { xPos = minDimension * 0.345; yPos = minDimension * 0.705; }
+    if (effectiveSteps == 26) { xPos = minDimension * 0.448; yPos = minDimension * 0.695; }
+    if (effectiveSteps == 27) { xPos = minDimension * 0.551; yPos = minDimension * 0.705; }
+    if (effectiveSteps == 28) { xPos = minDimension * 0.685; yPos = minDimension * 0.352; }
+    if (effectiveSteps == 29) { xPos = minDimension * 0.673; yPos = minDimension * 0.215; }
+    if (effectiveSteps == 30) { xPos = minDimension * 0.555; yPos = minDimension * 0.215; }
+    if (effectiveSteps == 31) { xPos = minDimension * 0.452; yPos = minDimension * 0.215; }
+    if (effectiveSteps == 32) { xPos = minDimension * 0.335; yPos = minDimension * 0.215; }
+    if (effectiveSteps == 33) { xPos = minDimension * 0.207; yPos = minDimension * 0.561; }
     return Offset(xPos, yPos);
   }
 
   @override
   Widget build(BuildContext context) {
     final Color themeColor = widget.gameType == 'jungle' ? Colors.green : Colors.lightBlue;
-    final String boardImage = widget.gameType == 'jungle'
-        ? 'images/IMG-20240301-WA0006.jpg'
-        : 'images/IMG-20240305-WA0002.jpg';
+    final String boardImage = widget.gameType == 'jungle' ? 'images/IMG-20240301-WA0006.jpg' : 'images/IMG-20240305-WA0002.jpg';
     final String currentPlayerTurn = 'p${currentPlayerIndex + 1}';
     final bool isMyTurn = (widget.player == currentPlayerTurn);
     final bool canIRoll = isMyTurn && gameStatus == 'playing';
@@ -752,26 +833,70 @@ class _GamePageState extends State<GamePage> {
                   Offset position = calculatePlayerPosition(steps);
                   String animal = playerAnimal[playerKey] ?? 'default';
                   Widget piece;
-                  // Replace this switch with Image.asset when you have your animal pngs
+                  // Use image assets for animals (jpg as you specified)
                   switch (animal) {
                     case 'lion':
-                      piece = const Icon(Icons.pets, color: Colors.orange, size: 40);
+                      piece = Container(
+                        width: minDimension * 0.12,
+                        height: minDimension * 0.12,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          image: DecorationImage(
+                            image: AssetImage('animals/lion.jpg'),
+                            fit: BoxFit.cover,
+                          ),
+                          border: Border.all(color: Colors.black, width: 2),
+                        ),
+                      );
                       break;
                     case 'tiger':
-                      piece = const Icon(Icons.pets, color: Colors.deepOrange, size: 40);
+                      piece = Container(
+                        width: minDimension * 0.12,
+                        height: minDimension * 0.12,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          image: DecorationImage(
+                            image: AssetImage('animals/tiger.jpg'),
+                            fit: BoxFit.cover,
+                          ),
+                          border: Border.all(color: Colors.black, width: 2),
+                        ),
+                      );
                       break;
                     case 'cheetah':
-                      piece = const Icon(Icons.pets, color: Colors.yellow, size: 40);
+                      piece = Container(
+                        width: minDimension * 0.12,
+                        height: minDimension * 0.12,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          image: DecorationImage(
+                            image: AssetImage('animals/cheetah.jpg'),
+                            fit: BoxFit.cover,
+                          ),
+                          border: Border.all(color: Colors.black, width: 2),
+                        ),
+                      );
                       break;
                     case 'elephant':
-                      piece = const Icon(Icons.pets, color: Colors.grey, size: 40);
+                      piece = Container(
+                        width: minDimension * 0.12,
+                        height: minDimension * 0.12,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                            image: DecorationImage(
+                              image: AssetImage('animals/elephant.jpg'),
+                              fit: BoxFit.cover,
+                            ),
+                          border: Border.all(color: Colors.black, width: 2),
+                        ),
+                      );
                       break;
                     default:
                       piece = Container(
-                        width: minDimension * 0.1,
                         height: minDimension * 0.1,
+                        width: minDimension * 0.1,
                         decoration: BoxDecoration(
-                          color: Colors.grey,
+                          color: playerColors[i % playerColors.length],
                           shape: BoxShape.circle,
                           border: Border.all(color: Colors.black, width: 2),
                         ),
@@ -1029,5 +1154,3 @@ class _SavedResultsListPageState extends State<SavedResultsListPage> {
     );
   }
 }
-olympic@olympic-book:~/jungle_professor$ 
-
