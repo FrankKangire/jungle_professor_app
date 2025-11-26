@@ -13,7 +13,7 @@ const wss = new WebSocket.Server({ server }); // WebSocket attached to HTTP
 
 // CONFIG
 const PORT = process.env.PORT || 10000;
-const MAX_PLAYERS = 4;                // scalable to 4 players
+const MAX_PLAYERS = 2;                // scalable to 4 players
 const BROADCAST_INTERVAL_MS = 1000;   // update broadcast interval
 const DELAY_BEFORE_QUIZ = 2000;
 
