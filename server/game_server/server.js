@@ -12,9 +12,8 @@ const DELAY_BEFORE_QUIZ = 2000;
 const clients = {};
 const games = {};
 
-// --- MASTER QUESTION DATABASE (Fully Populated from previous version) ---
-// This should be the massive object with all 34x3x2 questions.
-// It is omitted here for brevity but MUST be in your final file.
+// --- MASTER QUESTION DATABASE (Omitted for brevity) ---
+// This should be your massive object with all 34x3x2 questions.
 const allQuestions = {
     // --- JUNGLE PROFESSOR QUESTIONS ---
     'j_lion1': { id: "j_lion1", question: "LION: What is a group of lions called?", answer: "pride" },
@@ -179,6 +178,8 @@ const allQuestions = {
     'c_rio2': { id: "c_rio2", question: "CHRIST THE REDEEMER: The statue stands on top of which mountain?", answer: "corcovado" },
     'c_rio3': { id: "c_rio3", question: "CHRIST THE REDEEMER: Is it considered one of the New Seven Wonders of the World?", answer: "yes" },
 };
+
+// --- GAME BOARD MAP (FULLY POPULATED) ---
 const questionPositions = {
     1: { jungle: ['j_lion1', 'j_lion2', 'j_lion3'], city: ['c_moscow1', 'c_moscow2', 'c_moscow3'] },
     2: { jungle: ['j_rhino1', 'j_rhino2', 'j_rhino3'], city: ['c_giza1', 'c_giza2', 'c_giza3'] },
@@ -215,7 +216,6 @@ const questionPositions = {
     33: { jungle: ['j_elephant1', 'j_elephant2', 'j_elephant3'], city: ['c_tajmahal1', 'c_tajmahal2', 'c_tajmahal3'] },
     34: { jungle: ['j_tiger1', 'j_tiger2', 'j_tiger3'], city: ['c_wall1', 'c_wall2', 'c_wall3'] },
 };
-
 
 // Helper function to send a message to all clients in a specific game
 function broadcastToGame(gameId, payload) {
@@ -268,7 +268,7 @@ wss.on("connection", (ws) => {
                     } else {
                         availableGame.state.status = 'full';
                         console.log(`Game ${availableGame.id} is full. Starting game.`);
-                        startGame(availableGame.id, 'start_board'); // Use new start method
+                        startGame(availableGame.id, 'start_board');
                     }
                 }
             } else {
@@ -278,7 +278,7 @@ wss.on("connection", (ws) => {
                     id: gameId,
                     gameType: gameType,
                     clients: [{ clientId: clientId, player: "p1" }],
-                    state: { playerAnimals: {} }, // Initialize playerAnimals state
+                    state: { playerAnimals: {} },
                 };
                 const joinPayload = { method: "join", gameId: gameId, player: "p1" };
                 clients[clientId].connection.send(JSON.stringify(joinPayload));
@@ -302,7 +302,7 @@ wss.on("connection", (ws) => {
 
                     if (Object.keys(game.state.playerAnimals).length === game.clients.length) {
                         console.log(`All players in game ${gameId} have selected an animal. Starting board.`);
-                        startGame(gameId, 'start_board'); // Use new start method
+                        startGame(gameId, 'start_board');
                     }
                 }
             }
@@ -439,33 +439,29 @@ wss.on("connection", (ws) => {
     });
 });
 
+// --- CORRECTED startGame function ---
 function startGame(gameId, startMethod) {
     const game = games[gameId];
     if (!game) return;
-    // Only set up the game state if it hasn't been set up already (for animal selection)
-    if (!game.state.status || game.state.status !== 'selecting_animal') {
-        game.state = {
-            ...game.state, // Keep playerAnimals if it exists
-            status: 'playing',
-            currentPlayerIndex: 0,
-            lastDiceRoll: null,
-            lastEvent: "The game has begun!",
-            playerAnswering: null,
-            currentQuestionSet: null,
-            currentQuestionIndex: null,
-            answeredQuestions: []
-        };
-    } else {
-        game.state.status = 'playing';
-    }
+    
+    // Merge the new game state with any existing state (like playerAnimals)
+    game.state = {
+        ...game.state,
+        status: 'playing',
+        currentPlayerIndex: 0,
+        lastDiceRoll: null,
+        lastEvent: "The game has begun!",
+        playerAnswering: null,
+        currentQuestionSet: null,
+        currentQuestionIndex: null,
+        answeredQuestions: game.state.answeredQuestions || []
+    };
 
     game.clients.forEach(client => {
-        if (!game.state[client.player]) {
-            game.state[client.player] = { steps: 0 };
-        }
+        game.state[client.player] = { steps: 0 };
     });
 
-    const startPayload = { method: startMethod, game: game }; // Use the provided method
+    const startPayload = { method: startMethod, game: game };
     broadcastToGame(gameId, startPayload);
 }
 
