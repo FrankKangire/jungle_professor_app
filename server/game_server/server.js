@@ -12,8 +12,7 @@ const DELAY_BEFORE_QUIZ = 2000;
 const clients = {};
 const games = {};
 
-// --- MASTER QUESTION DATABASE (Omitted for brevity) ---
-// This should be your massive object with all 34x3x2 questions.
+// --- MASTER QUESTION DATABASE (FULLY POPULATED) ---
 const allQuestions = {
     // --- JUNGLE PROFESSOR QUESTIONS ---
     'j_lion1': { id: "j_lion1", question: "LION: What is a group of lions called?", answer: "pride" },
@@ -217,6 +216,7 @@ const questionPositions = {
     34: { jungle: ['j_tiger1', 'j_tiger2', 'j_tiger3'], city: ['c_wall1', 'c_wall2', 'c_wall3'] },
 };
 
+
 // Helper function to send a message to all clients in a specific game
 function broadcastToGame(gameId, payload) {
     const game = games[gameId];
@@ -261,13 +261,15 @@ wss.on("connection", (ws) => {
                 clients[clientId].connection.send(JSON.stringify(joinPayload));
                 
                 if (availableGame.clients.length === MAX_PLAYERS) {
+                    console.log(`Game ${availableGame.id} is now full.`);
                     if (gameType === 'jungle') {
+                        console.log("Dispatching to animal selection...");
                         availableGame.state.status = 'selecting_animal';
                         const selectionPayload = { method: 'go_to_animal_selection', game: availableGame };
                         broadcastToGame(availableGame.id, selectionPayload);
                     } else {
+                        console.log("Starting city game directly...");
                         availableGame.state.status = 'full';
-                        console.log(`Game ${availableGame.id} is full. Starting game.`);
                         startGame(availableGame.id, 'start_board');
                     }
                 }
@@ -439,7 +441,6 @@ wss.on("connection", (ws) => {
     });
 });
 
-// --- CORRECTED startGame function ---
 function startGame(gameId, startMethod) {
     const game = games[gameId];
     if (!game) return;
@@ -458,7 +459,9 @@ function startGame(gameId, startMethod) {
     };
 
     game.clients.forEach(client => {
-        game.state[client.player] = { steps: 0 };
+        if (!game.state[client.player]) {
+            game.state[client.player] = { steps: 0 };
+        }
     });
 
     const startPayload = { method: startMethod, game: game };
