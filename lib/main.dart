@@ -395,7 +395,26 @@ class _GameSelectionPageState extends State<GameSelectionPage> {
       } else if (method == 'join') {
         _playerIdentifier = data['player'];
         setState(() => _statusMessage = 'Joined Game! Waiting for players...');
-      } else if (method == 'start') {
+      } else if (method == 'go_to_animal_selection') {
+        _streamListener?.cancel();
+        _connectionHandedOff = true;
+        
+        if (mounted) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (context) => AnimalSelectionPage(
+                channel: _channel!,
+                stream: _broadcastController!,
+                clientId: _clientId!,
+                player: _playerIdentifier!,
+                game: data['game'],
+              ),
+            ),
+          );
+        }
+      }
+      else if (method == 'start_board') {
         _streamListener?.cancel();
         _connectionHandedOff = true;
         
@@ -454,6 +473,148 @@ class _GameSelectionPageState extends State<GameSelectionPage> {
   }
 }
 
+class AnimalSelectionPage extends StatefulWidget {
+  final WebSocketChannel channel;
+  final StreamController<String> stream;
+  final String clientId;
+  final String player;
+  final Map<String, dynamic> game;
+
+  const AnimalSelectionPage({
+    required this.channel, required this.stream, required this.clientId, required this.player, required this.game, Key? key
+  }) : super(key: key);
+
+  @override
+  _AnimalSelectionPageState createState() => _AnimalSelectionPageState();
+}
+
+class _AnimalSelectionPageState extends State<AnimalSelectionPage> {
+  StreamSubscription? _listener;
+  Set<String> _takenAnimals = {};
+  String? _mySelection;
+  bool _connectionHandedOff = false;
+
+  final List<String> animals = ['lion', 'tiger', 'cheetah', 'elephant'];
+  
+  @override
+  void initState() {
+    super.initState();
+    _updateTakenAnimals(widget.game);
+    _listener = widget.stream.stream.listen((message) {
+      if (!mounted) return;
+      final data = jsonDecode(message);
+      final method = data['method'];
+
+      if (method == 'update_selections') {
+        _updateTakenAnimals(data['game']);
+      } else if (method == 'start_board') {
+        _listener?.cancel();
+        _connectionHandedOff = true;
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (context) => GamePage(
+              channel: widget.channel,
+              stream: widget.stream.stream,
+              gameId: data['game']['id'],
+              clientId: widget.clientId,
+              player: widget.player,
+              gameType: 'jungle',
+              initialGameData: data,
+            ),
+          ),
+        );
+      }
+    });
+  }
+
+  void _updateTakenAnimals(Map<String, dynamic> gameData) {
+    if (gameData['state']?['playerAnimals'] != null) {
+      setState(() {
+        final playerAnimals = Map<String, String>.from(gameData['state']['playerAnimals']);
+        _takenAnimals = playerAnimals.values.toSet();
+        _mySelection = playerAnimals[widget.player];
+      });
+    }
+  }
+
+  void _selectAnimal(String animal) {
+    if (_mySelection == null && !_takenAnimals.contains(animal)) {
+      widget.channel.sink.add(jsonEncode({
+        'method': 'select_animal',
+        'gameId': widget.game['id'],
+        'clientId': widget.clientId,
+        'animal': animal,
+      }));
+    }
+  }
+
+  @override
+  void dispose() {
+    _listener?.cancel();
+    if (!_connectionHandedOff) {
+      widget.channel.sink.close();
+      widget.stream.close();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Choose Your Animal')),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              _mySelection == null ? 'Select your player avatar' : 'Waiting for other players...',
+              style: Theme.of(context).textTheme.headlineSmall,
+            ),
+            const SizedBox(height: 30),
+            Wrap(
+              spacing: 20,
+              runSpacing: 20,
+              alignment: WrapAlignment.center,
+              children: animals.map((animal) {
+                final bool isTaken = _takenAnimals.contains(animal);
+                final bool isMine = _mySelection == animal;
+
+                return GestureDetector(
+                  onTap: () => _selectAnimal(animal),
+                  child: Opacity(
+                    opacity: isTaken && !isMine ? 0.4 : 1.0,
+                    child: Card(
+                      elevation: isMine ? 10 : 4,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        side: isMine ? BorderSide(color: Colors.green, width: 3) : BorderSide.none,
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.all(12.0),
+                        child: Column(
+                          children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(8),
+                              child: Image.asset('animals/$animal.jpg', width: 100, height: 100, fit: BoxFit.cover),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(animal[0].toUpperCase() + animal.substring(1), style: const TextStyle(fontWeight: FontWeight.bold)),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class GamePage extends StatefulWidget {
   final WebSocketChannel channel;
   final Stream<String> stream;
@@ -482,8 +643,15 @@ class _GamePageState extends State<GamePage> {
   String _lastEventText = "Game has started!";
   bool _isPopupVisible = false;
   List<Map<String, dynamic>> _currentResults = [];
+  Map<String, String> _playerAnimals = {};
 
   final List<Color> playerColors = [Colors.blue, Colors.yellow, Colors.red, Colors.green];
+  final Map<String, String> animalImageMap = {
+    'lion': 'animals/lion.jpg',
+    'tiger': 'animals/tiger.jpg',
+    'cheetah': 'animals/cheetah.jpg',
+    'elephant': 'animals/elephant.jpg',
+  };
 
   @override
   void initState() {
@@ -582,10 +750,12 @@ class _GamePageState extends State<GamePage> {
         currentPlayerIndex = gameState['currentPlayerIndex'];
         _lastEventText = gameState['lastEvent'] ?? "Your turn!";
         
+        if (gameState['playerAnimals'] != null) {
+          _playerAnimals = Map<String, String>.from(gameState['playerAnimals']);
+        }
         if (gameState['answeredQuestions'] != null) {
           _currentResults = List<Map<String, dynamic>>.from(gameState['answeredQuestions']);
         }
-
         for (var i = 0; i < totalPlayers; i++) {
           String playerKey = 'p${i + 1}';
           if (gameState.containsKey(playerKey)) {
@@ -656,7 +826,6 @@ class _GamePageState extends State<GamePage> {
     final String currentPlayerTurn = 'p${currentPlayerIndex + 1}';
     final bool isMyTurn = (widget.player == currentPlayerTurn);
     final bool canIRoll = isMyTurn && gameStatus == 'playing';
-
     String buttonText = "Waiting for ${currentPlayerTurn.toUpperCase()}...";
     if (gameStatus != 'playing') {
       buttonText = "Waiting for answer...";
@@ -684,7 +853,6 @@ class _GamePageState extends State<GamePage> {
           ));
           return false;
         }
-        
         return false;
       },
       child: Scaffold(
@@ -701,16 +869,42 @@ class _GamePageState extends State<GamePage> {
                   String playerKey = 'p${i + 1}';
                   int steps = playerSteps[playerKey] ?? 0;
                   Offset position = calculatePlayerPosition(steps);
-                  playerWidgets.add(AnimatedPositioned(
-                    left: position.dx, top: position.dy, duration: const Duration(milliseconds: 300),
-                    child: Container(
-                      height: minDimension * 0.1, width: minDimension * 0.1,
+                  
+                  Widget playerPiece;
+                  String? playerAnimal = _playerAnimals[playerKey];
+
+                  if (widget.gameType == 'jungle' && playerAnimal != null && animalImageMap.containsKey(playerAnimal)) {
+                    playerPiece = ClipOval(
+                      child: Container(
+                        color: Colors.white,
+                        padding: const EdgeInsets.all(2.0),
+                        child: ClipOval(
+                          child: Image.asset(
+                            animalImageMap[playerAnimal]!,
+                            height: minDimension * 0.1,
+                            width: minDimension * 0.1,
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                      ),
+                    );
+                  } else {
+                    playerPiece = Container(
+                      height: minDimension * 0.1,
+                      width: minDimension * 0.1,
                       decoration: BoxDecoration(
                         color: playerColors[i % playerColors.length],
                         shape: BoxShape.circle,
                         border: Border.all(color: Colors.black, width: 2),
                       ),
-                    ),
+                    );
+                  }
+
+                  playerWidgets.add(AnimatedPositioned(
+                    left: position.dx,
+                    top: position.dy,
+                    duration: const Duration(milliseconds: 300),
+                    child: playerPiece,
                   ));
                 }
 
@@ -770,40 +964,27 @@ class ResultsPage extends StatelessWidget {
         return;
     }
 
-    final Map<String, String> body = {
-      'username': username,
-      'results_data': jsonEncode(results),
-      'game_type': gameType,
-    };
-
-    print("--- SENDING DATA TO SERVER ---");
-    print("URL: $PHP_API_URL/save_results.php");
-    print("Body: $body");
-
     try {
       final response = await http.post(
         Uri.parse('$PHP_API_URL/save_results.php'),
-        body: body, 
+        body: {
+          'username': username,
+          'results_data': jsonEncode(results),
+          'game_type': gameType,
+        },
       );
-
-      print("--- SERVER RESPONSE ---");
-      print("Status Code: ${response.statusCode}");
-      print("Response Body: ${response.body}");
-      
       if (context.mounted) {
         final data = jsonDecode(response.body);
         if (data['status'] == 'success') {
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Results saved!')));
           Navigator.of(context).pushNamedAndRemoveUntil('/welcome', (route) => false);
         } else {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Save failed: ${data['message']}')));
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(data['message'])));
         }
       }
     } catch(e) {
-      print("--- HTTP ERROR ---");
-      print(e.toString());
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Error saving results. Check logs.')));
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Error saving results.')));
       }
     }
   }
@@ -957,4 +1138,3 @@ class _SavedResultsListPageState extends State<SavedResultsListPage> {
     );
   }
 }
-
