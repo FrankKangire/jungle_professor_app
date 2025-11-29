@@ -262,15 +262,17 @@ wss.on("connection", (ws) => {
                 
                 if (availableGame.clients.length === MAX_PLAYERS) {
                     console.log(`Game ${availableGame.id} is now full.`);
+                    
                     if (gameType === 'jungle') {
                         console.log("Dispatching to animal selection...");
-                        availableGame.state.status = 'selecting_animal';
+                        availableGame.state.status = 'selecting_character';
                         const selectionPayload = { method: 'go_to_animal_selection', game: availableGame };
                         broadcastToGame(availableGame.id, selectionPayload);
-                    } else {
-                        console.log("Starting city game directly...");
-                        availableGame.state.status = 'full';
-                        startGame(availableGame.id, 'start_board');
+                    } else if (gameType === 'city') {
+                        console.log("Dispatching to city character selection...");
+                        availableGame.state.status = 'selecting_character';
+                        const selectionPayload = { method: 'go_to_city_selection', game: availableGame };
+                        broadcastToGame(availableGame.id, selectionPayload);
                     }
                 }
             } else {
@@ -280,30 +282,30 @@ wss.on("connection", (ws) => {
                     id: gameId,
                     gameType: gameType,
                     clients: [{ clientId: clientId, player: "p1" }],
-                    state: { playerAnimals: {} },
+                    state: { playerCharacters: {} }, // Use generic 'playerCharacters'
                 };
                 const joinPayload = { method: "join", gameId: gameId, player: "p1" };
                 clients[clientId].connection.send(JSON.stringify(joinPayload));
             }
         }
         
-        if (data.method === "select_animal") {
-            const { gameId, clientId, animal } = data;
+        if (data.method === "select_character") {
+            const { gameId, clientId, character } = data;
             const game = games[gameId];
-            if (!game || game.state.status !== 'selecting_animal') return;
+            if (!game || game.state.status !== 'selecting_character') return;
 
             const client = game.clients.find(c => c.clientId === clientId);
             if (client) {
-                const isTaken = Object.values(game.state.playerAnimals).includes(animal);
+                const isTaken = Object.values(game.state.playerCharacters).includes(character);
                 if (!isTaken) {
-                    game.state.playerAnimals[client.player] = animal;
-                    console.log(`Player ${client.player} in game ${gameId} selected ${animal}`);
+                    game.state.playerCharacters[client.player] = character;
+                    console.log(`Player ${client.player} in game ${gameId} selected ${character}`);
                     
                     const updatePayload = { method: 'update_selections', game: game };
                     broadcastToGame(gameId, updatePayload);
 
-                    if (Object.keys(game.state.playerAnimals).length === game.clients.length) {
-                        console.log(`All players in game ${gameId} have selected an animal. Starting board.`);
+                    if (Object.keys(game.state.playerCharacters).length === game.clients.length) {
+                        console.log(`All players in game ${gameId} have selected a character. Starting board.`);
                         startGame(gameId, 'start_board');
                     }
                 }
@@ -332,11 +334,13 @@ wss.on("connection", (ws) => {
             if (positionData) {
                 setTimeout(() => {
                     if (!games[gameId]) return;
+
                     const gameType = game.gameType;
                     const questionIdSet = positionData[gameType];
                     const questionSet = questionIdSet.map(id => allQuestions[id]).filter(q => q);
 
                     if (!questionSet || questionSet.length === 0) {
+                        console.log(`Error: Invalid or empty question set for square ${newSteps}.`);
                         game.state.currentPlayerIndex = (game.state.currentPlayerIndex + 1) % game.clients.length;
                         broadcastUpdate(gameId);
                         return;
@@ -357,10 +361,13 @@ wss.on("connection", (ws) => {
                         totalQuestions: game.state.currentQuestionSet.length,
                     };
                     
-                    if (clients[clientId]) clients[clientId].connection.send(JSON.stringify(askPayload));
+                    if (clients[clientId]) {
+                        clients[clientId].connection.send(JSON.stringify(askPayload));
+                    }
                     
                     game.state.lastEvent = `Player ${currentPlayer.player.toUpperCase()} landed on a question square!`;
                     broadcastUpdate(gameId);
+
                 }, DELAY_BEFORE_QUIZ);
             } else {
                 game.state.currentPlayerIndex = (game.state.currentPlayerIndex + 1) % game.clients.length;
@@ -398,7 +405,11 @@ wss.on("connection", (ws) => {
                     };
                     clients[clientId].connection.send(JSON.stringify(askPayload));
                 } else {
-                    game.state.lastEvent = `Player ${clientPlayer.player.toUpperCase()} finished the quiz!`;
+                    if(isCorrect) {
+                        game.state.lastEvent = `Player ${clientPlayer.player.toUpperCase()} finished the quiz correctly!`;
+                    } else {
+                        game.state.lastEvent = `Player ${clientPlayer.player.toUpperCase()} finished the quiz.`;
+                    }
                     game.state.status = 'playing';
                     game.state.playerAnswering = null;
                     game.state.currentQuestionSet = null;
@@ -414,6 +425,7 @@ wss.on("connection", (ws) => {
         console.log(`Client disconnected: ${clientId}`);
         let gameToEnd = null;
         let gameIdToEnd = null;
+
         for (const gameId in games) {
             const game = games[gameId];
             const clientIndex = game.clients.findIndex(c => c.clientId === clientId);
@@ -423,20 +435,25 @@ wss.on("connection", (ws) => {
                 break;
             }
         }
+
         if (gameToEnd) {
             console.log(`Player left game ${gameIdToEnd}. Ending game for all participants.`);
+            
             const gameOverPayload = {
                 method: "game_over",
                 results: gameToEnd.state.answeredQuestions || [],
                 gameType: gameToEnd.gameType
             };
+
             gameToEnd.clients.forEach(client => {
                 if (client.clientId !== clientId && clients[client.clientId]) {
                     clients[client.clientId].connection.send(JSON.stringify(gameOverPayload));
                 }
             });
+
             delete games[gameIdToEnd];
         }
+
         delete clients[clientId];
     });
 });
@@ -445,7 +462,6 @@ function startGame(gameId, startMethod) {
     const game = games[gameId];
     if (!game) return;
     
-    // Merge the new game state with any existing state (like playerAnimals)
     game.state = {
         ...game.state,
         status: 'playing',
